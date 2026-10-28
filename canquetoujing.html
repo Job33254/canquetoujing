@@ -1,0 +1,545 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>凸透镜切去中间 · 光心平移与成像动态演示</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: #06080c;
+    color: #e6edf3;
+    font-family: "PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 24px 16px 40px;
+  }
+  h1 { font-size: 19px; font-weight: 600; letter-spacing: .5px; color:#cdd9e5; text-align:center;}
+  .sub { font-size: 13px; color:#6e7681; margin-top:6px; margin-bottom:18px; text-align:center;}
+  .wrap {
+    position: relative;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 10px 50px rgba(0,0,0,.75), 0 0 0 1px rgba(120,160,220,.10);
+    background: #0b0e14;
+  }
+  canvas { display:block; width:900px; max-width:100%; height:auto; }
+  .status {
+    margin-top: 18px;
+    font-size: 15px;
+    min-height: 24px;
+    letter-spacing: .4px;
+    color: #ffd166;
+    transition: color .3s;
+    text-align:center;
+    max-width: 880px;
+    line-height: 1.5;
+  }
+  .status.two { color: #7ee787; }
+  .hint {
+    margin-top: 12px;
+    font-size: 12.5px;
+    color: #5c6672;
+    text-align:center;
+    line-height:1.6;
+  }
+</style>
+</head>
+<body>
+
+<h1>将凸透镜中间部分切除，再把两半向中间凑紧</h1>
+<div class="sub">观察光心（局部光轴）怎样移动，光屏上的像又怎样由一个变成两个</div>
+
+<div class="wrap">
+  <canvas id="scene"></canvas>
+</div>
+
+<div class="status" id="status"></div>
+<div class="hint">每半片透镜都是一个完整的凸透镜，只是口径变小；它的光心由球面决定，会随半片一起平移</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============ 画布初始化 ============ */
+  const canvas = document.getElementById('scene');
+  const ctx = canvas.getContext('2d');
+  const W = 900, H = 560;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  /* ============ 光学参数（像素） ============ */
+  const axisY   = 300;            // 主光轴画布 y
+  const lensX   = 440;            // 透镜位置
+  const objX    = 140;            // 物体位置
+  const u       = lensX - objX;   // 物距 300
+  const f       = 100;            // 焦距
+  const v       = u * f / (u - f); // 像距 150
+  const screenX = lensX + v;      // 光屏位置 590
+  const R       = 110;            // 透镜半高
+  const objH    = 60;             // 物高
+  const W_CUT   = 36;             // 中间切除的宽度
+  const MAX_PUSH = W_CUT / 2;     // 每半合拢的位移
+
+  const P2C = y => axisY - y;     // 物理坐标 → 画布坐标
+
+  /* ============ 动画时间轴 ============ */
+  const T_CUT_START  = 1.0;
+  const T_CUT_END    = 1.8;
+  const T_PUSH_START = 3.0;
+  const T_PUSH_END   = 5.0;
+  const CYCLE        = 7.5;
+
+  const easeInOut = x => x < 0.5 ? 2*x*x : 1 - Math.pow(-2*x+2, 2)/2;
+
+  function getState(t) {
+    let gapHalf = 0, pushAmt = 0;
+    if (t >= T_CUT_START && t < T_CUT_END) {
+      gapHalf = easeInOut((t - T_CUT_START) / (T_CUT_END - T_CUT_START)) * W_CUT / 2;
+    } else if (t >= T_CUT_END && t < T_PUSH_START) {
+      gapHalf = W_CUT / 2;
+    } else if (t >= T_PUSH_START && t < T_PUSH_END) {
+      gapHalf = W_CUT / 2;
+      pushAmt = easeInOut((t - T_PUSH_START) / (T_PUSH_END - T_PUSH_START)) * MAX_PUSH;
+    } else if (t >= T_PUSH_END) {
+      gapHalf = W_CUT / 2;
+      pushAmt = MAX_PUSH;
+    }
+    return { gapHalf, pushAmt };
+  }
+
+  /* ============ 绘图工具 ============ */
+  function roundRectPath(x, y, w, h, r) {
+    r = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  /* ---- 主光轴（原透镜的） ---- */
+  function drawAxis() {
+    ctx.save();
+    ctx.setLineDash([7, 7]);
+    ctx.strokeStyle = 'rgba(110,118,129,.40)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(30, axisY);
+    ctx.lineTo(W - 30, axisY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---- 两个半透镜的局部光轴 ---- */
+  function drawLocalAxes(pushAmt) {
+    const x1 = lensX - 115;
+    const x2 = lensX + 115;
+    const yTopAxis = axisY + pushAmt;  // 上片光心在物理 y = -push，画布 y = axisY + push
+    const yBotAxis = axisY - pushAmt;
+
+    if (pushAmt < 1.5) {
+      /* 两光轴重合：画成一条紫色虚线，并标注“重合” */
+      ctx.save();
+      ctx.setLineDash([6, 6]);
+      ctx.strokeStyle = 'rgba(190,140,255,.80)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(x1, axisY);
+      ctx.lineTo(x2, axisY);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(190,140,255,.95)';
+      ctx.font = '12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('两半局部光轴重合', x2 + 8, axisY);
+      ctx.restore();
+    } else {
+      /* 上片光轴（橙色） */
+      ctx.save();
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = 'rgba(255,184,108,.85)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x1, yTopAxis);
+      ctx.lineTo(x2, yTopAxis);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,184,108,.95)';
+      ctx.font = '12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('上片光轴', x2 + 8, yTopAxis);
+      ctx.restore();
+
+      /* 下片光轴（蓝色） */
+      ctx.save();
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = 'rgba(108,182,255,.85)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x1, yBotAxis);
+      ctx.lineTo(x2, yBotAxis);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(108,182,255,.95)';
+      ctx.font = '12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('下片光轴', x2 + 8, yBotAxis);
+      ctx.restore();
+    }
+  }
+
+  /* ---- 通过光心的辅助光线（物点 → 光心 → 像点 共线） ---- */
+  function drawNodalRay(yc, yImg, color) {
+    const ox = objX, oy = P2C(objH);
+    const ix = screenX, iy = P2C(yImg);
+
+    ctx.save();
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    ctx.lineTo(ix, iy);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---- 光线束 ---- */
+  function drawRayBundle(yBottom, yTop, yImg) {
+    const h = yTop - yBottom;
+    if (h < 1.5) return;
+    const N = 8;
+    const oy = P2C(objH);
+    const iy = P2C(yImg);
+
+    ctx.save();
+    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = 'rgba(255,205,100,.42)';
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const yy = yBottom + (i + 0.5) / N * h;
+      const ly = P2C(yy);
+      ctx.moveTo(objX, oy);
+      ctx.lineTo(lensX, ly);
+      ctx.lineTo(screenX, iy);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---- 透镜的一个半片 ---- */
+  function drawLensPart(yB, yT) {
+    if (yT - yB < 1.5) return;
+    const cyB = P2C(yB);
+    const cyT = P2C(yT);
+    const w = 16;
+    const x = lensX - w / 2;
+    const h = cyB - cyT;
+
+    ctx.save();
+    roundRectPath(x, cyT, w, h, Math.min(7, h / 2));
+    const grad = ctx.createLinearGradient(x, 0, x + w, 0);
+    grad.addColorStop(0,   'rgba(88,166,255,.12)');
+    grad.addColorStop(.5,  'rgba(120,190,255,.34)');
+    grad.addColorStop(1,   'rgba(88,166,255,.12)');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(120,190,255,.85)';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---- 原完整透镜的虚影 ---- */
+  function drawGhostLens() {
+    ctx.save();
+    ctx.setLineDash([4, 5]);
+    ctx.strokeStyle = 'rgba(120,190,255,.22)';
+    ctx.lineWidth = 1;
+    roundRectPath(lensX - 8, axisY - R, 16, 2 * R, 8);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---- 光屏 ---- */
+  function drawScreen() {
+    ctx.save();
+    ctx.fillStyle = 'rgba(210,220,235,.055)';
+    ctx.fillRect(screenX, axisY - 190, 11, 380);
+    ctx.strokeStyle = 'rgba(200,212,228,.45)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(screenX + .5, axisY - 189.5, 10, 379);
+    ctx.strokeStyle = 'rgba(150,160,175,.35)';
+    ctx.beginPath();
+    ctx.moveTo(screenX + 5, axisY + 190);
+    ctx.lineTo(screenX + 5, axisY + 218);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /* ---- 物体（向上的箭头） ---- */
+  function drawObject() {
+    const x = objX, y0 = axisY, y1 = axisY - objH;
+    ctx.save();
+    ctx.strokeStyle = '#ff8a5c';
+    ctx.fillStyle = '#ff8a5c';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x, y0);
+    ctx.lineTo(x, y1 + 10);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y1);
+    ctx.lineTo(x - 7.5, y1 + 15);
+    ctx.lineTo(x + 7.5, y1 + 15);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* ---- 像（箭头） ---- */
+  function drawImageArrow(yBase, yTip) {
+    const cb = P2C(yBase);
+    const ct = P2C(yTip);
+    const dir = Math.sign(ct - cb) || 1;
+    const x = screenX + 5;
+
+    ctx.save();
+    ctx.strokeStyle = '#7ee787';
+    ctx.fillStyle = '#7ee787';
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(126,231,135,.65)';
+    ctx.shadowBlur = 9;
+
+    ctx.beginPath();
+    ctx.moveTo(x, cb);
+    ctx.lineTo(x, ct - dir * 10);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(x, ct);
+    ctx.lineTo(x - 6.5, ct - dir * 13);
+    ctx.lineTo(x + 6.5, ct - dir * 13);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* ---- 光心标记 ---- */
+  function drawCenterDot(x, y, color, label, labelSide) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.85)';
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = 'bold 12px "PingFang SC",sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + 8, y + (labelSide > 0 ? -9 : 11));
+    ctx.restore();
+  }
+
+  function drawCenters(pushAmt) {
+    if (pushAmt < 1.5) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(lensX, axisY, 5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(200,150,255,.95)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,.85)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(200,150,255,.95)';
+      ctx.font = 'bold 12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('O₁ O₂ 重合', lensX + 9, axisY - 9);
+      ctx.restore();
+    } else {
+      drawCenterDot(lensX, axisY + pushAmt, 'rgba(255,184,108,.95)', 'O₁', 1);
+      drawCenterDot(lensX, axisY - pushAmt, 'rgba(108,182,255,.95)', 'O₂', -1);
+    }
+  }
+
+  /* ---- 图例 ---- */
+  function drawLegend() {
+    const x = 26, y = 26, lh = 24;
+    ctx.save();
+    ctx.font = '12.5px "PingFang SC",sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    // 上片光轴
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = 'rgba(255,184,108,.9)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + 26, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,184,108,.95)';
+    ctx.fillText('上片光轴 / 光心 O₁', x + 34, y);
+
+    // 下片光轴
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = 'rgba(108,182,255,.9)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(x, y + lh);
+    ctx.lineTo(x + 26, y + lh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(108,182,255,.95)';
+    ctx.fillText('下片光轴 / 光心 O₂', x + 34, y + lh);
+
+    // 像
+    ctx.strokeStyle = '#7ee787';
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + 2 * lh + 2);
+    ctx.lineTo(x + 4, y + 2 * lh - 8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + 2 * lh - 12);
+    ctx.lineTo(x - 1, y + 2 * lh - 4);
+    ctx.lineTo(x + 9, y + 2 * lh - 4);
+    ctx.closePath();
+    ctx.fillStyle = '#7ee787';
+    ctx.fill();
+    ctx.fillStyle = 'rgba(126,231,135,.95)';
+    ctx.fillText('光屏上的像', x + 34, y + 2 * lh);
+
+    // 辅助线说明
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = 'rgba(255,184,108,.65)';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(x, y + 3 * lh);
+    ctx.lineTo(x + 26, y + 3 * lh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(200,210,225,.75)';
+    ctx.fillText('过光心的辅助线', x + 34, y + 3 * lh);
+
+    ctx.restore();
+  }
+
+  /* ============ 主绘制 ============ */
+  function drawScene(t) {
+    const { gapHalf, pushAmt } = getState(t);
+
+    ctx.fillStyle = '#0b0e14';
+    ctx.fillRect(0, 0, W, H);
+
+    /* --- 几何计算 --- */
+    const yB_top =  gapHalf - pushAmt;
+    const yT_top =  R - pushAmt;
+    const yB_bot = -R + pushAmt;
+    const yT_bot = -gapHalf + pushAmt;
+
+    const yc_top = -pushAmt;
+    const yc_bot =  pushAmt;
+
+    const yImgTop = -objH * v / u + yc_top * v / f;
+    const yImgBot = -objH * v / u + yc_bot * v / f;
+
+    /* --- 绘制顺序 --- */
+    drawAxis();
+    drawLocalAxes(pushAmt);
+
+    // 过光心的辅助线（先画，在底层）
+    drawNodalRay(yc_top, yImgTop, 'rgba(255,184,108,.55)');
+    drawNodalRay(yc_bot, yImgBot, 'rgba(108,182,255,.55)');
+
+    if (gapHalf > 0.5) drawGhostLens();
+
+    // 实际光线束
+    drawRayBundle(yB_top, yT_top, yImgTop);
+    drawRayBundle(yB_bot, yT_bot, yImgBot);
+
+    // 透镜两片
+    drawLensPart(yB_top, yT_top);
+    drawLensPart(yB_bot, yT_bot);
+
+    // 光屏
+    drawScreen();
+
+    // 物体
+    drawObject();
+
+    // 像
+    drawImageArrow(yc_top * v / f, yImgTop);
+    drawImageArrow(yc_bot * v / f, yImgBot);
+
+    // 光心标记
+    drawCenters(pushAmt);
+
+    // 图例
+    drawLegend();
+  }
+
+  /* ============ 状态文字 ============ */
+  const statusEl = document.getElementById('status');
+  let lastText = '';
+  function updateStatus(t) {
+    let txt, cls = '';
+    if (t < T_CUT_END) {
+      txt = '完整凸透镜 → 光屏上只有 1 个像';
+    } else if (t < T_PUSH_START) {
+      txt = '切去中间：两半的光心仍重合于原光轴 → 像仍重合，看到 1 个像';
+    } else if (t < T_PUSH_END) {
+      txt = '两半向中间平移，它们的光心（局部光轴）随之分开……';
+    } else {
+      txt = '合拢后：两个光心分开 → 光屏上呈现 2 个像';
+      cls = 'two';
+    }
+    if (txt !== lastText) {
+      statusEl.textContent = txt;
+      statusEl.className = 'status ' + cls;
+      lastText = txt;
+    }
+  }
+
+  /* ============ 主循环 ============ */
+  let startTime = null;
+  function loop(now) {
+    if (startTime === null) startTime = now;
+    const t = ((now - startTime) / 1000) % CYCLE;
+    drawScene(t);
+    updateStatus(t);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
