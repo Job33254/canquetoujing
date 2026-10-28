@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>凸透镜切去中间 · 光心平移与成像动态演示</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background: #06080c;
+    color: #e6edf3;
+    font-family: "PingFang SC","Microsoft YaHei","Hiragino Sans GB",sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 24px 16px 40px;
+  }
+  h1 { font-size: 19px; font-weight: 600; letter-spacing: .5px; color:#cdd9e5; text-align:center;}
+  .sub { font-size: 13px; color:#6e7681; margin-top:6px; margin-bottom:18px; text-align:center;}
+  .wrap {
+    position: relative;
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 10px 50px rgba(0,0,0,.75), 0 0 0 1px rgba(120,160,220,.10);
+    background: #0b0e14;
+  }
+  canvas { display:block; width:900px; max-width:100%; height:auto; }
+  
+  /* 控制面板样式 */
+  .controls {
+    display: flex;
+    gap: 12px;
+    margin-top: 22px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    background: rgba(120, 160, 220, 0.08);
+    border: 1px solid rgba(120, 160, 220, 0.3);
+    color: #cdd9e5;
+    padding: 9px 18px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 14px;
+    font-family: inherit;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  button:hover {
+    background: rgba(120, 160, 220, 0.2);
+    border-color: rgba(120, 160, 220, 0.6);
+  }
+  button.active {
+    background: rgba(126, 231, 135, 0.15);
+    border-color: #7ee787;
+    color: #7ee787;
+    box-shadow: 0 0 10px rgba(126, 231, 135, 0.2);
+  }
+  button.play-btn.active {
+    background: rgba(255, 184, 108, 0.15);
+    border-color: #ffb86c;
+    color: #ffb86c;
+    box-shadow: 0 0 10px rgba(255, 184, 108, 0.2);
+  }
+
+  .status {
+    margin-top: 18px;
+    font-size: 15px;
+    min-height: 24px;
+    letter-spacing: .4px;
+    color: #ffd166;
+    transition: color .3s;
+    text-align:center;
+    max-width: 880px;
+    line-height: 1.5;
+  }
+  .status.two { color: #7ee787; }
+  .hint {
+    margin-top: 12px;
+    font-size: 12.5px;
+    color: #5c6672;
+    text-align:center;
+    line-height:1.6;
+  }
+</style>
+</head>
+<body>
+
+<h1>将凸透镜中间部分切除，再把两半向中间凑紧</h1>
+<div class="sub">观察光心（局部光轴）怎样移动，光屏上的像又怎样由一个变成两个</div>
+
+<div class="wrap">
+  <canvas id="scene"></canvas>
+</div>
+
+<!-- 交互按钮 -->
+<div class="controls">
+  <button id="btn-play" class="play-btn">▶️ 自动播放</button>
+  <button id="btn-pause">⏸️ 暂停</button>
+  <button id="btn-cut">✂️ 仅切割</button>
+  <button id="btn-push">🔄 合拢</button>
+  <button id="btn-reset">↺ 重置</button>
+</div>
+
+<div class="status" id="status"></div>
+<div class="hint">点击上面的按钮，可以随时暂停或分段观看</div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ============ 画布初始化 ============ */
+  const canvas = document.getElementById('scene');
+  const ctx = canvas.getContext('2d');
+  const W = 900, H = 560;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  canvas.style.width = W + 'px';
+  canvas.style.height = H + 'px';
+  ctx.scale(dpr, dpr);
+
+  /* ============ 光学参数（像素） ============ */
+  const axisY   = 300;            
+  const lensX   = 440;            
+  const objX    = 140;            
+  const u       = lensX - objX;   
+  const f       = 100;            
+  const v       = u * f / (u - f); 
+  const screenX = lensX + v;      
+  const R       = 110;            
+  const objH    = 60;             
+  const W_CUT   = 36;             
+  const MAX_PUSH = W_CUT / 2;     
+
+  const P2C = y => axisY - y;     
+
+  /* ============ 状态与动画变量 ============ */
+  // 当前实际物理状态
+  let gapHalf = 0; 
+  let pushAmt = 0; 
+
+  // 目标物理状态（动画会平滑趋向这里）
+  let targetGapHalf = 0;
+  let targetPushAmt = 0;
+
+  // 自动播放控制
+  let isAutoPlaying = false;
+  let autoPlayState = 'idle'; // idle, cutting, waiting_cut, pushing, waiting_push, resetting
+  let waitTimer = 0;
+
+  /* ============ UI 元素 ============ */
+  const statusEl = document.getElementById('status');
+  const btnPlay = document.getElementById('btn-play');
+  const btnPause = document.getElementById('btn-pause');
+  const btnCut = document.getElementById('btn-cut');
+  const btnPush = document.getElementById('btn-push');
+  const btnReset = document.getElementById('btn-reset');
+
+  /* ============ 绘图工具（无需修改的逻辑） ============ */
+  function roundRectPath(x, y, w, h, r) {
+    r = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function drawAxis() {
+    ctx.save();
+    ctx.setLineDash([7, 7]);
+    ctx.strokeStyle = 'rgba(110,118,129,.40)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(30, axisY);
+    ctx.lineTo(W - 30, axisY);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawLocalAxes(pushAmt) {
+    const x1 = lensX - 115;
+    const x2 = lensX + 115;
+    const yTopAxis = axisY + pushAmt;  
+    const yBotAxis = axisY - pushAmt;
+
+    if (pushAmt < 1.5) {
+      ctx.save();
+      ctx.setLineDash([6, 6]);
+      ctx.strokeStyle = 'rgba(190,140,255,.80)';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(x1, axisY);
+      ctx.lineTo(x2, axisY);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(190,140,255,.95)';
+      ctx.font = '12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('两半局部光轴重合', x2 + 8, axisY);
+      ctx.restore();
+    } else {
+      ctx.save();
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = 'rgba(255,184,108,.85)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x1, yTopAxis);
+      ctx.lineTo(x2, yTopAxis);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(255,184,108,.95)';
+      ctx.font = '12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('上片光轴', x2 + 8, yTopAxis);
+      ctx.restore();
+
+      ctx.save();
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = 'rgba(108,182,255,.85)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x1, yBotAxis);
+      ctx.lineTo(x2, yBotAxis);
+      ctx.stroke();
+      ctx.restore();
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(108,182,255,.95)';
+      ctx.font = '12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('下片光轴', x2 + 8, yBotAxis);
+      ctx.restore();
+    }
+  }
+
+  function drawNodalRay(yc, yImg, color) {
+    const ox = objX, oy = P2C(objH);
+    const ix = screenX, iy = P2C(yImg);
+
+    ctx.save();
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    ctx.lineTo(ix, iy);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawRayBundle(yBottom, yTop, yImg) {
+    const h = yTop - yBottom;
+    if (h < 1.5) return;
+    const N = 8;
+    const oy = P2C(objH);
+    const iy = P2C(yImg);
+
+    ctx.save();
+    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = 'rgba(255,205,100,.42)';
+    ctx.beginPath();
+    for (let i = 0; i < N; i++) {
+      const yy = yBottom + (i + 0.5) / N * h;
+      const ly = P2C(yy);
+      ctx.moveTo(objX, oy);
+      ctx.lineTo(lensX, ly);
+      ctx.lineTo(screenX, iy);
+    }
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawLensPart(yB, yT) {
+    if (yT - yB < 1.5) return;
+    const cyB = P2C(yB);
+    const cyT = P2C(yT);
+    const w = 16;
+    const x = lensX - w / 2;
+    const h = cyB - cyT;
+
+    ctx.save();
+    roundRectPath(x, cyT, w, h, Math.min(7, h / 2));
+    const grad = ctx.createLinearGradient(x, 0, x + w, 0);
+    grad.addColorStop(0,   'rgba(88,166,255,.12)');
+    grad.addColorStop(.5,  'rgba(120,190,255,.34)');
+    grad.addColorStop(1,   'rgba(88,166,255,.12)');
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(120,190,255,.85)';
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawGhostLens() {
+    ctx.save();
+    ctx.setLineDash([4, 5]);
+    ctx.strokeStyle = 'rgba(120,190,255,.22)';
+    ctx.lineWidth = 1;
+    roundRectPath(lensX - 8, axisY - R, 16, 2 * R, 8);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawScreen() {
+    ctx.save();
+    ctx.fillStyle = 'rgba(210,220,235,.055)';
+    ctx.fillRect(screenX, axisY - 190, 11, 380);
+    ctx.strokeStyle = 'rgba(200,212,228,.45)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(screenX + .5, axisY - 189.5, 10, 379);
+    ctx.strokeStyle = 'rgba(150,160,175,.35)';
+    ctx.beginPath();
+    ctx.moveTo(screenX + 5, axisY + 190);
+    ctx.lineTo(screenX + 5, axisY + 218);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  function drawObject() {
+    const x = objX, y0 = axisY, y1 = axisY - objH;
+    ctx.save();
+    ctx.strokeStyle = '#ff8a5c';
+    ctx.fillStyle = '#ff8a5c';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x, y0);
+    ctx.lineTo(x, y1 + 10);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y1);
+    ctx.lineTo(x - 7.5, y1 + 15);
+    ctx.lineTo(x + 7.5, y1 + 15);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawImageArrow(yBase, yTip) {
+    const cb = P2C(yBase);
+    const ct = P2C(yTip);
+    const dir = Math.sign(ct - cb) || 1;
+    const x = screenX + 5;
+
+    ctx.save();
+    ctx.strokeStyle = '#7ee787';
+    ctx.fillStyle = '#7ee787';
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.shadowColor = 'rgba(126,231,135,.65)';
+    ctx.shadowBlur = 9;
+
+    ctx.beginPath();
+    ctx.moveTo(x, cb);
+    ctx.lineTo(x, ct - dir * 10);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(x, ct);
+    ctx.lineTo(x - 6.5, ct - dir * 13);
+    ctx.lineTo(x + 6.5, ct - dir * 13);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawCenterDot(x, y, color, label, labelSide) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, 4.5, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,.85)';
+    ctx.lineWidth = 1.1;
+    ctx.stroke();
+
+    ctx.fillStyle = color;
+    ctx.font = 'bold 12px "PingFang SC",sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label, x + 8, y + (labelSide > 0 ? -9 : 11));
+    ctx.restore();
+  }
+
+  function drawCenters(pushAmt) {
+    if (pushAmt < 1.5) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(lensX, axisY, 5, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(200,150,255,.95)';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,.85)';
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(200,150,255,.95)';
+      ctx.font = 'bold 12px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('O₁ O₂ 重合', lensX + 9, axisY - 9);
+      ctx.restore();
+    } else {
+      drawCenterDot(lensX, axisY + pushAmt, 'rgba(255,184,108,.95)', 'O₁', 1);
+      drawCenterDot(lensX, axisY - pushAmt, 'rgba(108,182,255,.95)', 'O₂', -1);
+    }
+  }
+
+  function drawLegend() {
+    const x = 26, y = 26, lh = 24;
+    ctx.save();
+    ctx.font = '12.5px "PingFang SC",sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = 'rgba(255,184,108,.9)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + 26, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,184,108,.95)';
+    ctx.fillText('上片光轴 / 光心 O₁', x + 34, y);
+
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = 'rgba(108,182,255,.9)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(x, y + lh);
+    ctx.lineTo(x + 26, y + lh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(108,182,255,.95)';
+    ctx.fillText('下片光轴 / 光心 O₂', x + 34, y + lh);
+
+    ctx.strokeStyle = '#7ee787';
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + 2 * lh + 2);
+    ctx.lineTo(x + 4, y + 2 * lh - 8);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + 4, y + 2 * lh - 12);
+    ctx.lineTo(x - 1, y + 2 * lh - 4);
+    ctx.lineTo(x + 9, y + 2 * lh - 4);
+    ctx.closePath();
+    ctx.fillStyle = '#7ee787';
+    ctx.fill();
+    ctx.fillStyle = 'rgba(126,231,135,.95)';
+    ctx.fillText('光屏上的像', x + 34, y + 2 * lh);
+
+    ctx.setLineDash([5, 6]);
+    ctx.strokeStyle = 'rgba(255,184,108,.65)';
+    ctx.lineWidth = 1.3;
+    ctx.beginPath();
+    ctx.moveTo(x, y + 3 * lh);
+    ctx.lineTo(x + 26, y + 3 * lh);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(200,210,225,.75)';
+    ctx.fillText('过光心的辅助线', x + 34, y + 3 * lh);
+
+    ctx.restore();
+  }
+
+  /* ============ 核心渲染 ============ */
+  function drawScene() {
+    ctx.fillStyle = '#0b0e14';
+    ctx.fillRect(0, 0, W, H);
+
+    // 根据当前实际物理变量计算几何位置
+    const yB_top =  gapHalf - pushAmt;
+    const yT_top =  R - pushAmt;
+    const yB_bot = -R + pushAmt;
+    const yT_bot = -gapHalf + pushAmt;
+
+    const yc_top = -pushAmt;
+    const yc_bot =  pushAmt;
+
+    const yImgTop = -objH * v / u + yc_top * v / f;
+    const yImgBot = -objH * v / u + yc_bot * v / f;
+
+    drawAxis();
+    drawLocalAxes(pushAmt);
+    drawNodalRay(yc_top, yImgTop, 'rgba(255,184,108,.55)');
+    drawNodalRay(yc_bot, yImgBot, 'rgba(108,182,255,.55)');
+
+    if (gapHalf > 0.5) drawGhostLens();
+
+    drawRayBundle(yB_top, yT_top, yImgTop);
+    drawRayBundle(yB_bot, yT_bot, yImgBot);
+
+    drawLensPart(yB_top, yT_top);
+    drawLensPart(yB_bot, yT_bot);
+
+    drawScreen();
+    drawObject();
+
+    drawImageArrow(yc_top * v / f, yImgTop);
+    drawImageArrow(yc_bot * v / f, yImgBot);
+
+    drawCenters(pushAmt);
+    drawLegend();
+  }
+
+  /* ============ 状态更新与文字提示 ============ */
+  function updateStatusText() {
+    let txt = '', cls = '';
+    if (gapHalf < 0.5) {
+      txt = '完整凸透镜 → 光屏上只有 1 个像';
+    } else if (pushAmt < 0.5) {
+      txt = '切去中间：两半的光心仍重合于原光轴 → 像仍重合，看到 1 个像';
+    } else if (pushAmt < MAX_PUSH - 0.5) {
+      txt = '两半向中间平移，它们的光心（局部光轴）随之分开……';
+    } else {
+      txt = '合拢后：两个光心分开 → 光屏上呈现 2 个像';
+      cls = 'two';
+    }
+    
+    if (statusEl.textContent !== txt) {
+      statusEl.textContent = txt;
+      statusEl.className = 'status ' + cls;
+    }
+  }
+
+  function updateButtons() {
+    if (isAutoPlaying) {
+      btnPlay.classList.add('active');
+      btnPause.classList.remove('active');
+    } else {
+      btnPlay.classList.remove('active');
+    }
+
+    // 仅在非自动播放时，检测分段按钮的高亮
+    if (!isAutoPlaying) {
+      btnCut.classList.toggle('active', targetGapHalf > 0 && targetPushAmt === 0);
+      btnPush.classList.toggle('active', targetPushAmt > 0);
+      btnReset.classList.toggle('active', targetGapHalf === 0);
+    } else {
+      btnCut.classList.remove('active');
+      btnPush.classList.remove('active');
+      btnReset.classList.remove('active');
+    }
+  }
+
+  /* ============ 动画物理逻辑 ============ */
+  function updatePhysics(dt) {
+    // 线性插值系数，乘上 dt 确保不同帧率下速度一致
+    const easeFactor = Math.min(1, 12 * dt); 
+
+    // 逼近目标值
+    gapHalf += (targetGapHalf - gapHalf) * easeFactor;
+    pushAmt += (targetPushAmt - pushAmt) * easeFactor;
+
+    // 如果足够接近了，直接吸附，防止无限逼近导致数值抖动
+    if (Math.abs(gapHalf - targetGapHalf) < 0.1) gapHalf = targetGapHalf;
+    if (Math.abs(pushAmt - targetPushAmt) < 0.1) pushAmt = targetPushAmt;
+
+    // 处理自动播放的状态机
+    if (isAutoPlaying) {
+      if (autoPlayState === 'idle') {
+        targetGapHalf = W_CUT / 2;
+        targetPushAmt = 0;
+        autoPlayState = 'cutting';
+      } else if (autoPlayState === 'cutting') {
+        if (gapHalf === targetGapHalf && pushAmt === targetPushAmt) {
+          autoPlayState = 'waiting_cut';
+          waitTimer = 1.5; // 切割完成后停留 1.5 秒
+        }
+      } else if (autoPlayState === 'waiting_cut') {
+        waitTimer -= dt;
+        if (waitTimer <= 0) {
+          targetPushAmt = MAX_PUSH;
+          autoPlayState = 'pushing';
+        }
+      } else if (autoPlayState === 'pushing') {
+        if (gapHalf === targetGapHalf && pushAmt === targetPushAmt) {
+          autoPlayState = 'waiting_push';
+          waitTimer = 2.5; // 合拢后停留 2.5 秒，让学生看清楚两个像
+        }
+      } else if (autoPlayState === 'waiting_push') {
+        waitTimer -= dt;
+        if (waitTimer <= 0) {
+          targetGapHalf = 0;
+          targetPushAmt = 0;
+          autoPlayState = 'resetting';
+        }
+      } else if (autoPlayState === 'resetting') {
+        if (gapHalf === targetGapHalf && pushAmt === targetPushAmt) {
+          autoPlayState = 'idle'; // 重置完成，重新开始
+        }
+      }
+    }
+  }
+
+  /* ============ 按钮事件绑定 ============ */
+  btnPlay.addEventListener('click', () => {
+    if (isAutoPlaying) {
+      // 如果已经在播放，点击则暂停
+      isAutoPlaying = false;
+      btnPause.classList.add('active');
+    } else {
+      // 开始自动播放
+      isAutoPlaying = true;
+      autoPlayState = 'idle'; // 从头开始
+      btnPause.classList.remove('active');
+    }
+    updateButtons();
+  });
+
+  btnPause.addEventListener('click', () => {
+    isAutoPlaying = false;
+    btnPause.classList.add('active');
+    btnPlay.classList.remove('active');
+    updateButtons();
+  });
+
+  btnCut.addEventListener('click', () => {
+    isAutoPlaying = false;
+    targetGapHalf = W_CUT / 2;
+    targetPushAmt = 0;
+    btnPause.classList.remove('active');
+    updateButtons();
+  });
+
+  btnPush.addEventListener('click', () => {
+    isAutoPlaying = false;
+    targetGapHalf = W_CUT / 2;
+    targetPushAmt = MAX_PUSH;
+    btnPause.classList.remove('active');
+    updateButtons();
+  });
+
+  btnReset.addEventListener('click', () => {
+    isAutoPlaying = false;
+    targetGapHalf = 0;
+    targetPushAmt = 0;
+    btnPause.classList.remove('active');
+    updateButtons();
+  });
+
+  /* ============ 主循环 ============ */
+  let lastTime = performance.now();
+  
+  function loop(now) {
+    // 计算两帧之间的时间差（秒）
+    const dt = Math.min((now - lastTime) / 1000, 0.1); 
+    lastTime = now;
+
+    updatePhysics(dt);
+    drawScene();
+    updateStatusText();
+    
+    requestAnimationFrame(loop);
+  }
+
+  // 启动循环
+  requestAnimationFrame(loop);
+
+})();
+</script>
+</body>
+</html>
