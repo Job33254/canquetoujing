@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>凸透镜切去中间 · 光心平移与成像动态演示</title>
+<title>凸透镜切去中间 · 光心平移与像的亮暗变化</title>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   body {
@@ -17,14 +17,16 @@
   .sub { font-size: 13px; color:#6e7681; margin-top:6px; margin-bottom:18px; text-align:center;}
   .wrap {
     position: relative;
+    width: 900px;
+    max-width: 100%;
     border-radius: 14px;
     overflow: hidden;
     box-shadow: 0 10px 50px rgba(0,0,0,.75), 0 0 0 1px rgba(120,160,220,.10);
     background: #0b0e14;
   }
-  canvas { display:block; width:900px; max-width:100%; height:auto; }
-  
-  /* 控制面板样式 */
+  /* 只设宽度、让高度按 900:560 等比缩放，窄屏不会被压扁 */
+  canvas { display:block; width:100%; height:auto; aspect-ratio: 900 / 560; }
+
   .controls {
     display: flex;
     gap: 12px;
@@ -81,19 +83,19 @@
     color: #5c6672;
     text-align:center;
     line-height:1.6;
+    max-width: 880px;
   }
 </style>
 </head>
 <body>
 
 <h1>将凸透镜中间部分切除，再把两半向中间凑紧</h1>
-<div class="sub">观察光心（局部光轴）怎样移动，光屏上的像又怎样由一个变成两个</div>
+<div class="sub">观察光心（局部光轴）怎样移动、像怎样由一个裂变成两个，以及像本身怎样逐渐变暗</div>
 
 <div class="wrap">
   <canvas id="scene"></canvas>
 </div>
 
-<!-- 交互按钮 -->
 <div class="controls">
   <button id="btn-play" class="play-btn">▶️ 自动播放</button>
   <button id="btn-pause">⏸️ 暂停</button>
@@ -103,7 +105,7 @@
 </div>
 
 <div class="status" id="status"></div>
-<div class="hint">点击上面的按钮，可以随时暂停或分段观看</div>
+<div class="hint">像的颜色越亮＝越亮：完整透镜成一个 100% 亮的像，切去中间后变暗到 84%，合拢时像一边移动一边变暗，最后成为两个各约 42% 亮的像。点击按钮可随时暂停或分段观看。</div>
 
 <script>
 (function () {
@@ -116,37 +118,34 @@
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   canvas.width = W * dpr;
   canvas.height = H * dpr;
-  canvas.style.width = W + 'px';
-  canvas.style.height = H + 'px';
   ctx.scale(dpr, dpr);
+  // 不再写死 canvas.style.height，显示尺寸完全交给 CSS 等比缩放
 
   /* ============ 光学参数（像素） ============ */
-  const axisY   = 300;            
-  const lensX   = 440;            
-  const objX    = 140;            
-  const u       = lensX - objX;   
-  const f       = 100;            
-  const v       = u * f / (u - f); 
-  const screenX = lensX + v;      
-  const R       = 110;            
-  const objH    = 60;             
-  const W_CUT   = 36;             
-  const MAX_PUSH = W_CUT / 2;     
+  const axisY   = 300;
+  const lensX   = 440;
+  const objX    = 140;
+  const u       = lensX - objX;
+  const f       = 100;
+  const v       = u * f / (u - f);
+  const screenX = lensX + v;
+  const R       = 110;
+  const objH    = 60;
+  const W_CUT   = 36;
+  const MAX_PUSH = W_CUT / 2;
+  const APERTURE = 2 * R;          // 完整透镜的通光宽度 = 220
+  const IMG_H    = objH * v / u;   // 像高 = 30
 
-  const P2C = y => axisY - y;     
+  const P2C = y => axisY - y;
 
   /* ============ 状态与动画变量 ============ */
-  // 当前实际物理状态
-  let gapHalf = 0; 
-  let pushAmt = 0; 
-
-  // 目标物理状态（动画会平滑趋向这里）
+  let gapHalf = 0;
+  let pushAmt = 0;
   let targetGapHalf = 0;
   let targetPushAmt = 0;
 
-  // 自动播放控制
   let isAutoPlaying = false;
-  let autoPlayState = 'idle'; // idle, cutting, waiting_cut, pushing, waiting_push, resetting
+  let autoPlayState = 'idle';
   let waitTimer = 0;
 
   /* ============ UI 元素 ============ */
@@ -157,7 +156,63 @@
   const btnPush = document.getElementById('btn-push');
   const btnReset = document.getElementById('btn-reset');
 
-  /* ============ 绘图工具（无需修改的逻辑） ============ */
+  /* ============ 亮度模型 ============
+     薄透镜的任意一小片都能成完整的像，但像的亮度正比于这一片的通光宽度。
+     以完整透镜 (2R) 为 100%：bTop = hTop/(2R)，bBot = hBot/(2R)。
+     两像重合时亮度相加；合拢时两像错开，重叠部分逐渐消失，
+     于是「一个亮像」连续地变成「两个各约 42% 的暗像」。
+     这里用重叠比例把对方贡献的光平滑摊到当前像上，得到每个像的等效亮度，
+     再直接映射到像箭头的颜色深浅——亮度变化就长在像本身上。      */
+  function computeOptics() {
+    const yB_top =  gapHalf - pushAmt;
+    const yT_top =  R - pushAmt;
+    const yB_bot = -R + pushAmt;
+    const yT_bot = -gapHalf + pushAmt;
+
+    const hTop = Math.max(0, yT_top - yB_top);
+    const hBot = Math.max(0, yT_bot - yB_bot);
+
+    const yc_top = -pushAmt;
+    const yc_bot =  pushAmt;
+
+    // y像 = -h·v/u + yc·v/f，其中 (u+v)/u = v/f（由 1/u+1/v=1/f 推出）
+    const yImgTop = -IMG_H + yc_top * v / f;
+    const yImgBot = -IMG_H + yc_bot * v / f;
+
+    const bTop = hTop / APERTURE;
+    const bBot = hBot / APERTURE;
+
+    const sep = Math.abs(yImgTop - yImgBot);           // 两像对应点间距
+    const overlap = Math.max(0, 1 - sep / IMG_H);      // 1=完全重合, 0=完全分离
+    const bEffTop = bTop + bBot * overlap;
+    const bEffBot = bBot + bTop * overlap;
+
+    return {
+      yB_top, yT_top, yB_bot, yT_bot, hTop, hBot,
+      yc_top, yc_bot, yImgTop, yImgBot,
+      baseTop: yc_top * v / f,
+      baseBot: yc_bot * v / f,
+      bTop, bBot, bEffTop, bEffBot,
+      bTotal: bTop + bBot,
+      sep,
+      merged: sep < 1.0
+    };
+  }
+
+  /* 亮度 → 颜色明度：暗绿(42%) → 亮绿(100%)。
+     不用发光叠加、不用模糊光晕，保证倒立箭头始终轮廓清晰。 */
+  function brightnessColor(b) {
+    const t = Math.max(0, Math.min(1, (b - 0.42) / 0.58));
+    const sat = 40 + 45 * t;
+    const lit = 34 + 38 * t;
+    return 'hsl(140,' + sat.toFixed(0) + '%,' + lit.toFixed(0) + '%)';
+  }
+
+  function brightnessLevel(b) {
+    return Math.max(0, Math.min(1, (b - 0.42) / 0.58));
+  }
+
+  /* ============ 绘图工具 ============ */
   function roundRectPath(x, y, w, h, r) {
     r = Math.min(r, w/2, h/2);
     ctx.beginPath();
@@ -188,7 +243,7 @@
   function drawLocalAxes(pushAmt) {
     const x1 = lensX - 115;
     const x2 = lensX + 115;
-    const yTopAxis = axisY + pushAmt;  
+    const yTopAxis = axisY + pushAmt;
     const yBotAxis = axisY - pushAmt;
 
     if (pushAmt < 1.5) {
@@ -218,20 +273,8 @@
       ctx.moveTo(x1, yTopAxis);
       ctx.lineTo(x2, yTopAxis);
       ctx.stroke();
-      ctx.restore();
-
-      ctx.save();
-      ctx.fillStyle = 'rgba(255,184,108,.95)';
-      ctx.font = '12px "PingFang SC",sans-serif';
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.fillText('上片光轴', x2 + 8, yTopAxis);
-      ctx.restore();
-
-      ctx.save();
       ctx.setLineDash([6, 5]);
       ctx.strokeStyle = 'rgba(108,182,255,.85)';
-      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(x1, yBotAxis);
       ctx.lineTo(x2, yBotAxis);
@@ -239,10 +282,12 @@
       ctx.restore();
 
       ctx.save();
-      ctx.fillStyle = 'rgba(108,182,255,.95)';
       ctx.font = '12px "PingFang SC",sans-serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(255,184,108,.95)';
+      ctx.fillText('上片光轴', x2 + 8, yTopAxis);
+      ctx.fillStyle = 'rgba(108,182,255,.95)';
       ctx.fillText('下片光轴', x2 + 8, yBotAxis);
       ctx.restore();
     }
@@ -251,7 +296,6 @@
   function drawNodalRay(yc, yImg, color) {
     const ox = objX, oy = P2C(objH);
     const ix = screenX, iy = P2C(yImg);
-
     ctx.save();
     ctx.setLineDash([5, 6]);
     ctx.strokeStyle = color;
@@ -263,16 +307,17 @@
     ctx.restore();
   }
 
+  /* 每片只保留 2 条边缘光线 + 1 条过光心的辅助线，画面更干净 */
   function drawRayBundle(yBottom, yTop, yImg) {
     const h = yTop - yBottom;
     if (h < 1.5) return;
-    const N = 8;
+    const N = 2;
     const oy = P2C(objH);
     const iy = P2C(yImg);
 
     ctx.save();
     ctx.lineWidth = 1.1;
-    ctx.strokeStyle = 'rgba(255,205,100,.42)';
+    ctx.strokeStyle = 'rgba(255,205,100,.36)';
     ctx.beginPath();
     for (let i = 0; i < N; i++) {
       const yy = yBottom + (i + 0.5) / N * h;
@@ -352,19 +397,22 @@
     ctx.restore();
   }
 
-  function drawImageArrow(yBase, yTip) {
+  /* 像本体：亮度直接决定颜色深浅与线宽；无任何发光叠加，轮廓始终清晰。
+     百分比标签贴在箭头尖端旁、随像一起移动。 */
+  function drawImageArrow(yBase, yTip, brightness, showLabel) {
     const cb = P2C(yBase);
     const ct = P2C(yTip);
     const dir = Math.sign(ct - cb) || 1;
     const x = screenX + 5;
+    const k = brightnessLevel(brightness);
+    const color = brightnessColor(brightness);
 
     ctx.save();
-    ctx.strokeStyle = '#7ee787';
-    ctx.fillStyle = '#7ee787';
-    ctx.lineWidth = 2.6;
+    ctx.strokeStyle = color;
+    ctx.fillStyle = color;
+    ctx.lineWidth = 2.2 + 1.3 * k;
     ctx.lineCap = 'round';
-    ctx.shadowColor = 'rgba(126,231,135,.65)';
-    ctx.shadowBlur = 9;
+    ctx.lineJoin = 'round';
 
     ctx.beginPath();
     ctx.moveTo(x, cb);
@@ -377,6 +425,13 @@
     ctx.lineTo(x + 6.5, ct - dir * 13);
     ctx.closePath();
     ctx.fill();
+
+    if (showLabel) {
+      ctx.font = 'bold 11px "PingFang SC",sans-serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(Math.round(brightness * 100) + '%', x + 13, ct - dir * 5);
+    }
     ctx.restore();
   }
 
@@ -464,7 +519,7 @@
     ctx.fillStyle = '#7ee787';
     ctx.fill();
     ctx.fillStyle = 'rgba(126,231,135,.95)';
-    ctx.fillText('光屏上的像', x + 34, y + 2 * lh);
+    ctx.fillText('光屏上的像（颜色越亮＝像越亮）', x + 34, y + 2 * lh);
 
     ctx.setLineDash([5, 6]);
     ctx.strokeStyle = 'rgba(255,184,108,.65)';
@@ -477,63 +532,72 @@
     ctx.fillStyle = 'rgba(200,210,225,.75)';
     ctx.fillText('过光心的辅助线', x + 34, y + 3 * lh);
 
+    ctx.fillStyle = 'rgba(140,152,168,.85)';
+    ctx.font = '12px "PingFang SC",sans-serif';
+    ctx.fillText('每片仅画 2 条光线', x, y + 4 * lh);
+
+    /* 静态色标：只说明颜色含义，不是独立的实时小窗 */
+    const gy = y + 5 * lh;
+    const grad = ctx.createLinearGradient(x, 0, x + 84, 0);
+    grad.addColorStop(0, brightnessColor(0.42));
+    grad.addColorStop(1, brightnessColor(1.0));
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, gy - 4, 84, 8);
+    ctx.fillStyle = 'rgba(150,162,178,.9)';
+    ctx.fillText('暗 42%  →  亮 100%', x + 94, gy);
     ctx.restore();
   }
 
   /* ============ 核心渲染 ============ */
-  function drawScene() {
+  function drawScene(s) {
     ctx.fillStyle = '#0b0e14';
     ctx.fillRect(0, 0, W, H);
 
-    // 根据当前实际物理变量计算几何位置
-    const yB_top =  gapHalf - pushAmt;
-    const yT_top =  R - pushAmt;
-    const yB_bot = -R + pushAmt;
-    const yT_bot = -gapHalf + pushAmt;
-
-    const yc_top = -pushAmt;
-    const yc_bot =  pushAmt;
-
-    const yImgTop = -objH * v / u + yc_top * v / f;
-    const yImgBot = -objH * v / u + yc_bot * v / f;
-
     drawAxis();
     drawLocalAxes(pushAmt);
-    drawNodalRay(yc_top, yImgTop, 'rgba(255,184,108,.55)');
-    drawNodalRay(yc_bot, yImgBot, 'rgba(108,182,255,.55)');
+    drawNodalRay(s.yc_top, s.yImgTop, 'rgba(255,184,108,.55)');
+    drawNodalRay(s.yc_bot, s.yImgBot, 'rgba(108,182,255,.55)');
 
     if (gapHalf > 0.5) drawGhostLens();
 
-    drawRayBundle(yB_top, yT_top, yImgTop);
-    drawRayBundle(yB_bot, yT_bot, yImgBot);
+    drawRayBundle(s.yB_top, s.yT_top, s.yImgTop);
+    drawRayBundle(s.yB_bot, s.yT_bot, s.yImgBot);
 
-    drawLensPart(yB_top, yT_top);
-    drawLensPart(yB_bot, yT_bot);
+    drawLensPart(s.yB_top, s.yT_top);
+    drawLensPart(s.yB_bot, s.yT_bot);
 
     drawScreen();
     drawObject();
 
-    drawImageArrow(yc_top * v / f, yImgTop);
-    drawImageArrow(yc_bot * v / f, yImgBot);
+    /* 关键：两像重合时只画一个箭头，避免出现两团叠在一起的绿光；
+       分开后各画一个，亮度随移动连续下降。 */
+    if (s.merged) {
+      drawImageArrow(s.baseTop, s.yImgTop, s.bTotal, true);
+    } else {
+      const twoLabels = s.sep >= 16;
+      drawImageArrow(s.baseTop, s.yImgTop, s.bEffTop, true);
+      drawImageArrow(s.baseBot, s.yImgBot, s.bEffBot, twoLabels);
+    }
 
     drawCenters(pushAmt);
     drawLegend();
   }
 
   /* ============ 状态更新与文字提示 ============ */
-  function updateStatusText() {
+  function updateStatusText(s) {
+    const pct = n => Math.round(n * 100) + '%';
     let txt = '', cls = '';
     if (gapHalf < 0.5) {
-      txt = '完整凸透镜 → 光屏上只有 1 个像';
+      txt = '完整凸透镜 → 光屏上 1 个清晰的倒立像，亮度 100%（基准）';
     } else if (pushAmt < 0.5) {
-      txt = '切去中间：两半的光心仍重合于原光轴 → 像仍重合，看到 1 个像';
+      txt = '切去中间：两半光心仍重合 → 像仍重合为 1 个，但通光减少，亮度降为 ' + pct(s.bTotal);
     } else if (pushAmt < MAX_PUSH - 0.5) {
-      txt = '两半向中间平移，它们的光心（局部光轴）随之分开……';
+      txt = '合拢中：像一边移动一边变暗，一个亮像逐渐裂变成两个暗像……';
     } else {
-      txt = '合拢后：两个光心分开 → 光屏上呈现 2 个像';
+      txt = '合拢后：光屏上 2 个清晰的倒立像，每个约 ' + pct(s.bTop) + ' 亮度（各分到约一半光）';
       cls = 'two';
     }
-    
+
     if (statusEl.textContent !== txt) {
       statusEl.textContent = txt;
       statusEl.className = 'status ' + cls;
@@ -548,7 +612,6 @@
       btnPlay.classList.remove('active');
     }
 
-    // 仅在非自动播放时，检测分段按钮的高亮
     if (!isAutoPlaying) {
       btnCut.classList.toggle('active', targetGapHalf > 0 && targetPushAmt === 0);
       btnPush.classList.toggle('active', targetPushAmt > 0);
@@ -562,18 +625,14 @@
 
   /* ============ 动画物理逻辑 ============ */
   function updatePhysics(dt) {
-    // 线性插值系数，乘上 dt 确保不同帧率下速度一致
-    const easeFactor = Math.min(1, 12 * dt); 
+    const easeFactor = Math.min(1, 12 * dt);
 
-    // 逼近目标值
     gapHalf += (targetGapHalf - gapHalf) * easeFactor;
     pushAmt += (targetPushAmt - pushAmt) * easeFactor;
 
-    // 如果足够接近了，直接吸附，防止无限逼近导致数值抖动
     if (Math.abs(gapHalf - targetGapHalf) < 0.1) gapHalf = targetGapHalf;
     if (Math.abs(pushAmt - targetPushAmt) < 0.1) pushAmt = targetPushAmt;
 
-    // 处理自动播放的状态机
     if (isAutoPlaying) {
       if (autoPlayState === 'idle') {
         targetGapHalf = W_CUT / 2;
@@ -582,7 +641,7 @@
       } else if (autoPlayState === 'cutting') {
         if (gapHalf === targetGapHalf && pushAmt === targetPushAmt) {
           autoPlayState = 'waiting_cut';
-          waitTimer = 1.5; // 切割完成后停留 1.5 秒
+          waitTimer = 1.5;
         }
       } else if (autoPlayState === 'waiting_cut') {
         waitTimer -= dt;
@@ -593,7 +652,7 @@
       } else if (autoPlayState === 'pushing') {
         if (gapHalf === targetGapHalf && pushAmt === targetPushAmt) {
           autoPlayState = 'waiting_push';
-          waitTimer = 2.5; // 合拢后停留 2.5 秒，让学生看清楚两个像
+          waitTimer = 2.5;
         }
       } else if (autoPlayState === 'waiting_push') {
         waitTimer -= dt;
@@ -604,7 +663,7 @@
         }
       } else if (autoPlayState === 'resetting') {
         if (gapHalf === targetGapHalf && pushAmt === targetPushAmt) {
-          autoPlayState = 'idle'; // 重置完成，重新开始
+          autoPlayState = 'idle';
         }
       }
     }
@@ -613,13 +672,11 @@
   /* ============ 按钮事件绑定 ============ */
   btnPlay.addEventListener('click', () => {
     if (isAutoPlaying) {
-      // 如果已经在播放，点击则暂停
       isAutoPlaying = false;
       btnPause.classList.add('active');
     } else {
-      // 开始自动播放
       isAutoPlaying = true;
-      autoPlayState = 'idle'; // 从头开始
+      autoPlayState = 'idle';
       btnPause.classList.remove('active');
     }
     updateButtons();
@@ -658,20 +715,19 @@
 
   /* ============ 主循环 ============ */
   let lastTime = performance.now();
-  
+
   function loop(now) {
-    // 计算两帧之间的时间差（秒）
-    const dt = Math.min((now - lastTime) / 1000, 0.1); 
+    const dt = Math.min((now - lastTime) / 1000, 0.1);
     lastTime = now;
 
     updatePhysics(dt);
-    drawScene();
-    updateStatusText();
-    
+    const s = computeOptics();
+    drawScene(s);
+    updateStatusText(s);
+
     requestAnimationFrame(loop);
   }
 
-  // 启动循环
   requestAnimationFrame(loop);
 
 })();
